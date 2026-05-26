@@ -273,6 +273,8 @@ impl CredenceBond {
     }
 
     /// Withdraw from bond. Checks that the bond has sufficient balance after accounting for slashed amount.
+    /// For rolling bonds, requires a prior `request_withdrawal` call and that
+    /// `now >= withdrawal_requested_at + notice_period` has elapsed.
     /// Returns the updated bond with reduced bonded_amount.
     pub fn withdraw(e: Env, amount: i128) -> IdentityBond {
         let key = DataKey::Bond;
@@ -281,6 +283,20 @@ impl CredenceBond {
             .instance()
             .get::<_, IdentityBond>(&key)
             .unwrap_or_else(|| panic!("no bond"));
+
+        // Rolling bonds must have completed the notice window before funds can leave.
+        if bond.is_rolling {
+            if bond.withdrawal_requested_at == 0 {
+                panic!("withdrawal not requested");
+            }
+            let earliest = bond
+                .withdrawal_requested_at
+                .checked_add(bond.notice_period)
+                .expect("notice period overflow");
+            if e.ledger().timestamp() < earliest {
+                panic!("notice period not elapsed");
+            }
+        }
 
         // Calculate available balance (bonded - slashed)
         let available = bond
@@ -384,7 +400,9 @@ impl CredenceBond {
         bond
     }
 
-    /// If bond is rolling and period has ended, renew (new period start = now). Emits renewal event.
+    /// If bond is rolling, no withdrawal has been requested, and the period has ended,
+    /// renew (new period start = now). Skips silently if a withdrawal was requested.
+    /// Emits renewal event on actual renewal.
     pub fn renew_if_rolling(e: Env) -> IdentityBond {
         let key = DataKey::Bond;
         let mut bond = e
@@ -393,6 +411,10 @@ impl CredenceBond {
             .get::<_, IdentityBond>(&key)
             .unwrap_or_else(|| panic!("no bond"));
         if !bond.is_rolling {
+            return bond;
+        }
+        // Do not auto-renew once the holder has signalled intent to withdraw.
+        if bond.withdrawal_requested_at != 0 {
             return bond;
         }
         let now = e.ledger().timestamp();
@@ -518,6 +540,22 @@ impl CredenceBond {
             panic!("bond not active");
         }
 
+        // Rolling bonds must have completed the notice window before funds can leave.
+        if bond.is_rolling {
+            if bond.withdrawal_requested_at == 0 {
+                Self::release_lock(&e);
+                panic!("withdrawal not requested");
+            }
+            let earliest = bond
+                .withdrawal_requested_at
+                .checked_add(bond.notice_period)
+                .expect("notice period overflow");
+            if e.ledger().timestamp() < earliest {
+                Self::release_lock(&e);
+                panic!("notice period not elapsed");
+            }
+        }
+
         let withdraw_amount = bond.bonded_amount - bond.slashed_amount;
 
         // State update BEFORE external interaction (checks-effects-interactions)
@@ -528,6 +566,9 @@ impl CredenceBond {
             bond_duration: bond.bond_duration,
             slashed_amount: bond.slashed_amount,
             active: false,
+            is_rolling: bond.is_rolling,
+            withdrawal_requested_at: bond.withdrawal_requested_at,
+            notice_period: bond.notice_period,
         };
         e.storage().instance().set(&bond_key, &updated);
 
