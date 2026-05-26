@@ -141,10 +141,17 @@ impl CredenceBond {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::IntoVal;
     use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
 
-    fn setup() -> (Env, Address, CredenceBondClient<'static>, Address, Address, Address) {
+    fn setup() -> (
+        Env,
+        Address,
+        CredenceBondClient<'static>,
+        Address,
+        Address,
+        Address,
+    ) {
         let e = Env::default();
         let contract_id = e.register(CredenceBond, ());
         let client = CredenceBondClient::new(&e, &contract_id);
