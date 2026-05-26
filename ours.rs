@@ -44,6 +44,8 @@ pub use types::Attestation;
 #[contracttype]
 pub enum DataKey {
     Admin,
+    /// Emergency pause flag. When true, mutating entrypoints are blocked.
+    Paused,
     Bond,
     Attester(Address),
     Attestation(u64),
@@ -66,24 +68,38 @@ impl CredenceBond {
     pub fn initialize(e: Env, admin: Address) {
         admin.require_auth();
         e.storage().instance().set(&DataKey::Admin, &admin);
+        e.storage().instance().set(&DataKey::Paused, &false);
     }
 
-    /// Set early exit penalty config. Only admin should call.
+    /// Return whether emergency pause mode is active.
+    pub fn is_paused(e: Env) -> bool {
+        Self::paused(&e)
+    }
+
+    /// Pause mutating bond entrypoints. Only the stored admin can call.
+    pub fn pause(e: Env, admin: Address) {
+        Self::require_admin(&e, &admin);
+        e.storage().instance().set(&DataKey::Paused, &true);
+        e.events().publish((Symbol::new(&e, "paused"),), admin);
+    }
+
+    /// Unpause mutating bond entrypoints. Only the stored admin can call.
+    pub fn unpause(e: Env, admin: Address) {
+        Self::require_admin(&e, &admin);
+        e.storage().instance().set(&DataKey::Paused, &false);
+        e.events().publish((Symbol::new(&e, "unpaused"),), admin);
+    }
+
+    /// Set early exit penalty config. Only admin should call. Blocked while paused.
     pub fn set_early_exit_config(e: Env, admin: Address, treasury: Address, penalty_bps: u32) {
-        admin.require_auth();
-        let stored_admin: Address = e
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("not initialized"));
-        if stored_admin != admin {
-            panic!("not admin");
-        }
+        Self::require_not_paused(&e);
+        Self::require_admin(&e, &admin);
         early_exit_penalty::set_config(&e, treasury, penalty_bps);
     }
 
-    /// Register an authorized attester (only admin can call).
+    /// Register an authorized attester (only admin can call). Blocked while paused.
     pub fn register_attester(e: Env, attester: Address) {
+        Self::require_not_paused(&e);
         let admin: Address = e
             .storage()
             .instance()
@@ -98,8 +114,9 @@ impl CredenceBond {
             .publish((Symbol::new(&e, "attester_registered"),), attester);
     }
 
-    /// Remove an attester's authorization (only admin can call).
+    /// Remove an attester's authorization (only admin can call). Blocked while paused.
     pub fn unregister_attester(e: Env, attester: Address) {
+        Self::require_not_paused(&e);
         let admin: Address = e
             .storage()
             .instance()
@@ -122,8 +139,8 @@ impl CredenceBond {
             .unwrap_or(false)
     }
 
-    /// Create or top-up a bond for an identity. In a full implementation this would
-    /// transfer USDC from the caller and store the bond.
+    /// Create or top-up a bond for an identity. Blocked while paused.
+    /// In a full implementation this would transfer USDC from the caller and store the bond.
     pub fn create_bond(
         e: Env,
         identity: Address,
@@ -132,6 +149,7 @@ impl CredenceBond {
         is_rolling: bool,
         notice_period_duration: u64,
     ) -> IdentityBond {
+        Self::require_not_paused(&e);
         let bond_start = e.ledger().timestamp();
 
         // Verify the end timestamp wouldn't overflow
@@ -165,7 +183,7 @@ impl CredenceBond {
             .unwrap_or_else(|| panic!("no bond"))
     }
 
-    /// Add an attestation for a subject (only authorized attesters can call).
+    /// Add an attestation for a subject (only authorized attesters can call). Blocked while paused.
     /// Requires correct nonce for replay prevention; rejects duplicate (verifier, identity, data).
     /// Weight is computed from attester stake (weighted attestation system).
     ///
@@ -182,6 +200,7 @@ impl CredenceBond {
         attestation_data: String,
         nonce: u64,
     ) -> Attestation {
+        Self::require_not_paused(&e);
         attester.require_auth();
 
         let is_authorized = e
@@ -254,8 +273,10 @@ impl CredenceBond {
         attestation
     }
 
-    /// Revoke an attestation (only the original attester can revoke). Requires correct nonce.
+    /// Revoke an attestation (only the original attester can revoke). Blocked while paused.
+    /// Requires correct nonce.
     pub fn revoke_attestation(e: Env, attester: Address, attestation_id: u64, nonce: u64) {
+        Self::require_not_paused(&e);
         attester.require_auth();
         nonce::consume_nonce(&e, &attester, nonce);
 
@@ -352,31 +373,19 @@ impl CredenceBond {
         nonce::get_nonce(&e, &identity)
     }
 
-    /// Set attester stake (admin only). Used for weighted attestation; weight is derived from this.
+    /// Set attester stake (admin only). Blocked while paused.
+    /// Used for weighted attestation; weight is derived from this.
     pub fn set_attester_stake(e: Env, admin: Address, attester: Address, amount: i128) {
-        let stored_admin: Address = e
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("not initialized"));
-        admin.require_auth();
-        if admin != stored_admin {
-            panic!("not admin");
-        }
+        Self::require_not_paused(&e);
+        Self::require_admin(&e, &admin);
         weighted_attestation::set_attester_stake(&e, &attester, amount);
     }
 
     /// Set weight config: multiplier_bps (e.g. 100 = 1%), max_attestation_weight. Admin only.
+    /// Blocked while paused.
     pub fn set_weight_config(e: Env, admin: Address, multiplier_bps: u32, max_weight: u32) {
-        let stored_admin: Address = e
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("not initialized"));
-        admin.require_auth();
-        if admin != stored_admin {
-            panic!("not admin");
-        }
+        Self::require_not_paused(&e);
+        Self::require_admin(&e, &admin);
         weighted_attestation::set_weight_config(&e, multiplier_bps, max_weight);
     }
 
@@ -385,9 +394,11 @@ impl CredenceBond {
         weighted_attestation::get_weight_config(&e)
     }
 
-    /// Withdraw from bond. Checks that the bond has sufficient balance after accounting for slashed amount.
+    /// Withdraw from bond. Blocked while paused.
+    /// Checks that the bond has sufficient balance after accounting for slashed amount.
     /// Returns the updated bond with reduced bonded_amount.
     pub fn withdraw(e: Env, amount: i128) -> IdentityBond {
+        Self::require_not_paused(&e);
         let key = DataKey::Bond;
         let mut bond = e
             .storage()
@@ -421,9 +432,11 @@ impl CredenceBond {
         bond
     }
 
-    /// Withdraw before lock-up end; applies early exit penalty and transfers penalty to treasury.
+    /// Withdraw before lock-up end; blocked while paused.
+    /// Applies early exit penalty and transfers penalty to treasury.
     /// Net amount to user = amount - penalty. Use when lock-up has not yet ended.
     pub fn withdraw_early(e: Env, amount: i128) -> IdentityBond {
+        Self::require_not_paused(&e);
         let key = DataKey::Bond;
         let mut bond = e
             .storage()
@@ -471,8 +484,10 @@ impl CredenceBond {
         bond
     }
 
-    /// Request withdrawal (rolling bonds). Withdrawal allowed after notice period.
+    /// Request withdrawal (rolling bonds). Blocked while paused.
+    /// Withdrawal allowed after notice period.
     pub fn request_withdrawal(e: Env) -> IdentityBond {
+        Self::require_not_paused(&e);
         let key = DataKey::Bond;
         let mut bond = e
             .storage()
@@ -494,8 +509,10 @@ impl CredenceBond {
         bond
     }
 
-    /// If bond is rolling and period has ended, renew (new period start = now). Emits renewal event.
+    /// If bond is rolling and period has ended, renew (new period start = now). Blocked while paused.
+    /// Emits renewal event.
     pub fn renew_if_rolling(e: Env) -> IdentityBond {
+        Self::require_not_paused(&e);
         let key = DataKey::Bond;
         let mut bond = e
             .storage()
@@ -541,11 +558,13 @@ impl CredenceBond {
     /// # Events
     /// Emits `bond_slashed` event with (identity, slash_amount, total_slashed_amount)
     pub fn slash(e: Env, admin: Address, amount: i128) -> IdentityBond {
+        Self::require_not_paused(&e);
         slashing::slash_bond(&e, &admin, amount)
     }
 
-    /// Top up the bond with additional amount (checks for overflow)
+    /// Top up the bond with additional amount (checks for overflow). Blocked while paused.
     pub fn top_up(e: Env, amount: i128) -> IdentityBond {
+        Self::require_not_paused(&e);
         let key = DataKey::Bond;
         let mut bond = e
             .storage()
@@ -563,8 +582,9 @@ impl CredenceBond {
         bond
     }
 
-    /// Extend bond duration (checks for u64 overflow on timestamps)
+    /// Extend bond duration (checks for u64 overflow on timestamps). Blocked while paused.
     pub fn extend_duration(e: Env, additional_duration: u64) -> IdentityBond {
+        Self::require_not_paused(&e);
         let key = DataKey::Bond;
         let mut bond = e
             .storage()
@@ -588,16 +608,18 @@ impl CredenceBond {
         bond
     }
 
-    /// Deposit fees into the contract's fee pool.
+    /// Deposit fees into the contract's fee pool. Blocked while paused.
     pub fn deposit_fees(e: Env, amount: i128) {
+        Self::require_not_paused(&e);
         let key = Symbol::new(&e, "fees");
         let current: i128 = e.storage().instance().get(&key).unwrap_or(0);
         e.storage().instance().set(&key, &(current + amount));
     }
 
-    /// Withdraw the full bonded amount back to the identity.
+    /// Withdraw the full bonded amount back to the identity. Blocked while paused.
     /// Uses a reentrancy guard to prevent re-entrance during external calls.
     pub fn withdraw_bond(e: Env, identity: Address) -> i128 {
+        Self::require_not_paused(&e);
         identity.require_auth();
         Self::acquire_lock(&e);
 
@@ -649,9 +671,10 @@ impl CredenceBond {
         withdraw_amount
     }
 
-    /// Slash a portion of a bond. Only callable by admin.
+    /// Slash a portion of a bond. Only callable by admin. Blocked while paused.
     /// Uses a reentrancy guard to prevent re-entrance during external calls.
     pub fn slash_bond(e: Env, admin: Address, slash_amount: i128) -> i128 {
+        Self::require_not_paused(&e);
         admin.require_auth();
         Self::acquire_lock(&e);
 
@@ -712,9 +735,10 @@ impl CredenceBond {
         new_slashed
     }
 
-    /// Collect accumulated protocol fees. Only callable by admin.
+    /// Collect accumulated protocol fees. Only callable by admin. Blocked while paused.
     /// Uses a reentrancy guard to prevent re-entrance during external calls.
     pub fn collect_fees(e: Env, admin: Address) -> i128 {
+        Self::require_not_paused(&e);
         admin.require_auth();
         Self::acquire_lock(&e);
 
@@ -746,8 +770,9 @@ impl CredenceBond {
         fees
     }
 
-    /// Register a callback contract address (for testing external call hooks).
+    /// Register a callback contract address (for testing external call hooks). Blocked while paused.
     pub fn set_callback(e: Env, addr: Address) {
+        Self::require_not_paused(&e);
         e.storage()
             .instance()
             .set(&Symbol::new(&e, "callback"), &addr);
@@ -778,6 +803,31 @@ impl CredenceBond {
         let key = Symbol::new(e, "locked");
         e.storage().instance().get(&key).unwrap_or(false)
     }
+
+    fn paused(e: &Env) -> bool {
+        e.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(e: &Env) {
+        if Self::paused(e) {
+            panic!("contract paused");
+        }
+    }
+
+    fn require_admin(e: &Env, admin: &Address) {
+        let stored_admin: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("not initialized"));
+        if stored_admin != *admin {
+            panic!("not admin");
+        }
+        admin.require_auth();
+    }
 }
 
 #[cfg(test)]
@@ -794,6 +844,9 @@ mod test_weighted_attestation;
 
 #[cfg(test)]
 mod test_replay_prevention;
+
+#[cfg(test)]
+mod test_pausable;
 
 #[cfg(test)]
 mod security;
