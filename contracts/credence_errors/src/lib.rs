@@ -55,7 +55,11 @@ pub enum ErrorCategory {
 ///   500 - 599 : Delegation
 ///   600 - 699 : Treasury
 ///   700 - 799 : Arithmetic
-#[contracterror]
+// Keep conversions generated, but do not export this utility enum as contract
+// spec metadata. The shared enum has more variants than Soroban's current
+// exported error-enum case vector limit supports, and this crate is not a
+// deployed contract interface.
+#[contracterror(export = false)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ContractError {
@@ -189,6 +193,27 @@ pub enum ContractError {
     /// Contracts: bond, dispute_resolution, fixed_duration_bond
     UnsupportedToken = 213,
 
+    /// Bond amount must be strictly positive (> 0).
+    /// Triggered by: create_bond called with amount <= 0
+    /// Contracts: bond
+    InvalidBondAmount = 214,
+
+    /// Bond duration must be strictly positive (> 0).
+    /// Triggered by: create_bond called with duration == 0
+    /// Contracts: bond
+    InvalidBondDuration = 215,
+
+    /// Rolling-bond notice_period_duration must be > 0 and <= duration.
+    /// Triggered by: create_bond called with is_rolling=true and notice_period_duration == 0
+    ///               or notice_period_duration > duration
+    /// Contracts: bond
+    InvalidNoticePeriod = 216,
+
+    /// Bond already exists for this identity.
+    /// Triggered by: create_bond called for an identity that already has an active bond
+    /// Contracts: bond
+    BondAlreadyExists = 217,
+
     // --- Attestation (300-399) ---
     /// An attestation already exists from this attester for this bond.
     /// Replaces: panic!("duplicate attestation")
@@ -266,6 +291,11 @@ pub enum ContractError {
     /// Replaces: panic!("already revoked")
     /// Contracts: delegation
     AlreadyRevoked = 502,
+
+    /// Delegation expiry timestamp exceeds the maximum allowed lifetime.
+    /// Triggered by: expires_at > now + MAX_DELEGATION_DURATION
+    /// Contracts: delegation
+    DelegationExpiryTooLong = 503,
 
     // --- Treasury (600-699) ---
     /// Amount argument must be strictly positive (> 0).
@@ -358,7 +388,11 @@ impl ErrorExt for ContractError {
             | ContractError::EarlyExitConfigNotSet
             | ContractError::InvalidPenaltyBps
             | ContractError::LeverageExceeded
-            | ContractError::UnsupportedToken => ErrorCategory::Bond,
+            | ContractError::UnsupportedToken
+            | ContractError::InvalidBondAmount
+            | ContractError::InvalidBondDuration
+            | ContractError::InvalidNoticePeriod
+            | ContractError::BondAlreadyExists => ErrorCategory::Bond,
 
             ContractError::DuplicateAttestation
             | ContractError::AttestationNotFound
@@ -376,7 +410,8 @@ impl ErrorExt for ContractError {
 
             ContractError::ExpiryInPast
             | ContractError::DelegationNotFound
-            | ContractError::AlreadyRevoked => ErrorCategory::Delegation,
+            | ContractError::AlreadyRevoked
+            | ContractError::DelegationExpiryTooLong => ErrorCategory::Delegation,
 
             ContractError::AmountMustBePositive
             | ContractError::ThresholdExceedsSigners
@@ -417,6 +452,10 @@ impl ErrorExt for ContractError {
             }
             ContractError::ReentrancyDetected => "Reentrancy detected; call rejected",
             ContractError::InvalidNonce => "Nonce is replayed or out of order",
+            ContractError::DomainMismatch => "Payload domain tag does not match the expected delegated action",
+            ContractError::OwnerMismatch => "Payload owner does not match the expected caller owner",
+            ContractError::TargetMismatch => "Payload target does not match the expected action target",
+            ContractError::ContractIdMismatch => "Payload contract_id does not match the current contract address",
             ContractError::NegativeStake => "Attester stake cannot be negative",
             ContractError::EarlyExitConfigNotSet => {
                 "Early-exit configuration has not been set for this bond"
@@ -424,6 +463,10 @@ impl ErrorExt for ContractError {
             ContractError::InvalidPenaltyBps => "Penalty bps must be in range 0-10000",
             ContractError::LeverageExceeded => "Resulting leverage exceeds the configured maximum",
             ContractError::UnsupportedToken => "Token transfer resulted in different amount than requested (fee-on-transfer tokens not supported)",
+            ContractError::InvalidBondAmount => "Bond amount must be strictly positive (> 0)",
+            ContractError::InvalidBondDuration => "Bond duration must be strictly positive (> 0)",
+            ContractError::InvalidNoticePeriod => "Rolling-bond notice_period_duration must be > 0 and <= duration",
+            ContractError::BondAlreadyExists => "Bond already exists for this identity",
             ContractError::DuplicateAttestation => "Attestation already exists from this attester",
             ContractError::AttestationNotFound => "No attestation found for the given key",
             ContractError::AttestationAlreadyRevoked => "Attestation has already been revoked",
@@ -449,6 +492,9 @@ impl ErrorExt for ContractError {
             ContractError::ExpiryInPast => "Delegation expiry must be in the future",
             ContractError::DelegationNotFound => "No delegation found for the given key",
             ContractError::AlreadyRevoked => "Delegation has already been revoked",
+            ContractError::DelegationExpiryTooLong => {
+                "Delegation expiry exceeds the maximum allowed lifetime"
+            }
             ContractError::AmountMustBePositive => "Amount must be strictly positive (> 0)",
             ContractError::ThresholdExceedsSigners => {
                 "Threshold cannot exceed the current signer count"

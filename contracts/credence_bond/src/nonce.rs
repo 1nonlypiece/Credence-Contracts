@@ -1,24 +1,10 @@
-//! Replay attack prevention using per-identity nonces and deadline enforcement.
-//!
-//! Each identity has a nonce that must be included in state-changing calls.
-//! The contract rejects replayed transactions by requiring nonce to match
-//! the stored value, then incrementing it.
-//!
-//! Deadline enforcement ensures signatures cannot be used after expiry,
-//! preventing long-lived replay windows. An optional grace window can be
-//! configured by the admin to absorb minor ledger-inclusion delays near the
-//! deadline boundary — it is DISABLED (0) by default.
-//!
-//! Domain binding ties each operation to the specific contract address,
-//! blocking cross-contract replay.
-//!
-//! The nonce validation flow is atomic: deadline and contract-domain checks are
-//! performed before the nonce is consumed, so stale or wrong-context signatures
-//! do not advance the counter.
-//!
-//! Signed actions are bound to the current contract address; this prevents the
-//! same nonce/deadline pair from replaying in a different contract context.
+//! Nonce tracking for replay prevention in the credence bond contract.
+//! 
+//! Safety buffer added on top of the nonce TTL.
+const MIN_NONCE_TTL: u32 = 518_400;
 
+use credence_errors::ContractError;
+use soroban_sdk::panic_with_error;
 use soroban_sdk::{Address, Env};
 
 use crate::DataKey;
@@ -39,12 +25,13 @@ pub fn get_nonce(e: &Env, identity: &Address) -> u64 {
 pub fn consume_nonce(e: &Env, identity: &Address, expected_nonce: u64) {
     let current = get_nonce(e, identity);
     if current != expected_nonce {
-        panic!("invalid nonce: replay or out-of-order");
+        panic_with_error!(e, ContractError::InvalidNonce);
     }
     let next = current.checked_add(1).expect("nonce overflow");
     e.storage()
         .instance()
         .set(&DataKey::Nonce(identity.clone()), &next);
+    bump_nonce_ttl(e, &DataKey::Nonce(identity.clone()), 0);
 }
 
 /// Returns the configured grace window in seconds (0 = strict enforcement).
@@ -73,7 +60,7 @@ pub fn require_not_expired(e: &Env, deadline: u64) {
     // saturating_add prevents u64 overflow on pathological deadline values
     let effective_deadline = deadline.saturating_add(grace);
     if now > effective_deadline {
-        panic!("signature expired: deadline passed");
+        panic_with_error!(e, ContractError::SignatureExpired);
     }
 }
 
@@ -92,7 +79,7 @@ pub fn require_not_expired(e: &Env, deadline: u64) {
 pub fn require_domain_match(e: &Env, expected_contract: &Address) {
     let current = e.current_contract_address();
     if current != *expected_contract {
-        panic!("domain mismatch: wrong contract address");
+        panic_with_error!(e, ContractError::DomainMismatch);
     }
 }
 
@@ -133,8 +120,12 @@ pub fn validate_and_consume_with_grace(
     let now = e.ledger().timestamp();
     let effective_deadline = deadline.saturating_add(grace);
     if now > effective_deadline {
-        panic!("signature expired: deadline passed");
+        panic_with_error!(e, ContractError::SignatureExpired);
     }
     require_domain_match(e, expected_contract);
     consume_nonce(e, identity, nonce);
+}
+
+fn bump_nonce_ttl(e: &Env, key: &DataKey, _ttl: u32) {
+    e.storage().instance().extend_ttl(MIN_NONCE_TTL, MIN_NONCE_TTL * 2);
 }
