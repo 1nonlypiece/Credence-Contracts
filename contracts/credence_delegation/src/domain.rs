@@ -80,7 +80,7 @@ pub struct DelegatedActionPayload {
     pub nonce: u64,
     /// The signature scheme: Ed25519, Secp256r1, or MLDSA44.
     /// Defaults to Ed25519 for backwards compatibility with legacy payloads.
-    pub scheme: u8,
+    pub scheme: u32,
 }
 
 /// Validates that the fields in `payload` match the parameters supplied at the

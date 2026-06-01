@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 #![allow(
     deprecated,
     unused_imports,
@@ -362,25 +362,25 @@ pub enum ContractError {
     /// Wire-stable: do not renumber this error code.
     DelegationExpiryTooLong = 503,
 
-    /// Payload domain tag does not match the expected delegated action.
-    /// Replaces: panic!("domain mismatch")
+    /// Unknown or unsupported signature scheme tag.
     /// Contracts: delegation
-    DomainMismatch = 504,
+    /// Wire-stable: do not renumber this error code.
+    UnknownScheme = 504,
 
-    /// Payload owner does not match the expected caller owner.
-    /// Replaces: panic!("owner mismatch")
+    /// Verifier already registered for the given scheme tag.
     /// Contracts: delegation
-    OwnerMismatch = 505,
+    /// Wire-stable: do not renumber this error code.
+    VerifierAlreadyRegistered = 505,
 
-    /// Payload target does not match the expected action target.
-    /// Replaces: panic!("target mismatch")
+    /// No verifier registered for the given scheme tag.
     /// Contracts: delegation
-    TargetMismatch = 506,
+    /// Wire-stable: do not renumber this error code.
+    VerifierNotRegistered = 506,
 
-    /// Payload contract_id does not match the current contract address.
-    /// Replaces: panic!("contract_id mismatch")
+    /// Signature verification failed for the given scheme and payload.
     /// Contracts: delegation
-    ContractIdMismatch = 507,
+    /// Wire-stable: do not renumber this error code.
+    VerificationFailed = 507,
 
     // --- Treasury (600-699) ---
     /// Amount argument must be strictly positive (> 0).
@@ -512,10 +512,10 @@ impl ErrorExt for ContractError {
             | ContractError::DelegationNotFound
             | ContractError::AlreadyRevoked
             | ContractError::DelegationExpiryTooLong
-            | ContractError::DomainMismatch
-            | ContractError::OwnerMismatch
-            | ContractError::TargetMismatch
-            | ContractError::ContractIdMismatch => ErrorCategory::Delegation,
+            | ContractError::UnknownScheme
+            | ContractError::VerifierAlreadyRegistered
+            | ContractError::VerifierNotRegistered
+            | ContractError::VerificationFailed => ErrorCategory::Delegation,
 
             ContractError::AmountMustBePositive
             | ContractError::ThresholdExceedsSigners
@@ -599,18 +599,6 @@ impl ErrorExt for ContractError {
             ContractError::AlreadyRevoked => "Delegation has already been revoked",
             ContractError::DelegationExpiryTooLong => {
                 "Delegation expiry exceeds the maximum allowed lifetime"
-            }
-            ContractError::DomainMismatch => {
-                "Payload domain tag does not match the expected delegated action"
-            }
-            ContractError::OwnerMismatch => {
-                "Payload owner does not match the expected caller owner"
-            }
-            ContractError::TargetMismatch => {
-                "Payload target does not match the expected action target"
-            }
-            ContractError::ContractIdMismatch => {
-                "Payload contract_id does not match the current contract address"
             }
             ContractError::UnknownScheme => "Unknown or unsupported signature scheme tag",
             ContractError::VerifierAlreadyRegistered => {

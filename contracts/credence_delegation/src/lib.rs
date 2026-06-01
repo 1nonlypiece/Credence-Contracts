@@ -76,7 +76,7 @@ enum DataKey {
     Nonce(Address),
     /// Verifier ID for a given signature scheme tag (scheme -> Address).
     /// Maps scheme tag (Ed25519=0, Secp256r1=1, MLDSA44=2) to a verifier address.
-    Verifier(u8),
+    Verifier(u32),
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +123,16 @@ impl CredenceDelegation {
     /// The owner must be the transaction signer. `expires_at` must be greater
     /// than the current ledger timestamp and no later than
     /// `now + MAX_DELEGATION_DURATION`.
+    ///
+    /// # Expiry Validation (Boundary Enforcement)
+    /// - **Lower bound**: `expires_at > now` (strictly greater) — prevents already-expired or
+    ///   never-expiring delegations from creation. Rejects equality at boundary.
+    /// - **Upper bound**: `expires_at ≤ now + MAX_DELEGATION_DURATION` — prevents unreasonably
+    ///   distant expirations that could enable indefinite delegations.
+    /// - **u64::MAX case**: Always rejected via upper bound check (treating it as effectively
+    ///   infinite expiry).
+    /// - **Rejects before state**: Expiry validation occurs before nonce consumption, so an
+    ///   invalid expiry does not burn a nonce or create a delegation entry.
     pub fn delegate(
         e: Env,
         owner: Address,
@@ -196,6 +206,12 @@ impl CredenceDelegation {
     /// validates the underlying transaction signature. The same expiry bounds
     /// as [`Self::delegate`] apply before nonce consumption, so invalid
     /// expiries cannot burn a relayed payload's nonce.
+    ///
+    /// # Expiry Validation (Boundary Enforcement)
+    /// - **Lower bound**: `expires_at > now` (strictly greater)
+    /// - **Upper bound**: `expires_at ≤ now + MAX_DELEGATION_DURATION`
+    /// - **Monotonic ledger safety**: Timestamp is captured once at validation entry;
+    ///   this test harness verifies no code path drifts with mid-call ledger advances.
     pub fn execute_delegated_delegate(
         e: Env,
         owner: Address,
@@ -293,6 +309,10 @@ impl CredenceDelegation {
     ///
     /// Delegations expire exactly at `expires_at`: the record is valid only
     /// while `e.ledger().timestamp() < expires_at`.
+    ///
+    /// # Expiry Boundary
+    /// - At `timestamp == expires_at` exactly, the delegation is already invalid (has expired).
+    /// - Returns `false` when `e.ledger().timestamp() >= expires_at`.
     pub fn is_valid_delegate(
         e: Env,
         owner: Address,
@@ -303,6 +323,7 @@ impl CredenceDelegation {
         match e.storage().persistent().get::<_, Delegation>(&key) {
             Some(d) => {
                 nonce::bump_delegation_ttl(&e, &key, d.expires_at);
+                // Validity check: not revoked AND expires_at > current timestamp (strictly greater)
                 !d.revoked && d.expires_at > e.ledger().timestamp()
             }
             None => false,
@@ -377,9 +398,9 @@ impl CredenceDelegation {
     /// # Errors
     /// * `NotAdmin` - if `admin` is not the contract admin
     /// * `UnknownScheme` - if scheme is not a recognized value
-    pub fn register_verifier(e: Env, admin: Address, scheme: u8, verifier_id: Address) {
+    pub fn register_verifier(e: Env, admin: Address, scheme: u32, verifier_id: Address) {
         admin.require_auth();
-        
+
         // Check that only the admin can register verifiers
         let stored_admin: Address = e
             .storage()
@@ -391,14 +412,14 @@ impl CredenceDelegation {
         }
 
         // Validate scheme is known
-        verifier::validate_scheme_registered(&e, scheme);
+        verifier::validate_scheme_registered(&e, scheme as u8);
 
         // Register the verifier
         let key = DataKey::Verifier(scheme);
         e.storage().instance().set(&key, &verifier_id);
 
         // Emit audit event
-        verifier::emit_verifier_registered(&e, scheme, &verifier_id, &admin);
+        verifier::emit_verifier_registered(&e, scheme as u8, &verifier_id, &admin);
 
         e.events().publish(
             (Symbol::new(&e, "verifier_registered"), scheme),
@@ -413,10 +434,10 @@ impl CredenceDelegation {
     ///
     /// Clients can use this to check scheme support before submitting
     /// delegated payloads.
-    pub fn get_verifier(e: Env, scheme: u8) -> Option<Address> {
+    pub fn get_verifier(e: Env, scheme: u32) -> Option<Address> {
         e.storage()
             .instance()
-            .get(&DataKey::Verifier(scheme))
+            .get(&DataKey::Verifier(scheme as u8))
     }
 
     // -----------------------------------------------------------------------
@@ -455,12 +476,55 @@ impl CredenceDelegation {
     // Private helpers
     // -----------------------------------------------------------------------
 
+    /// Enforce expiry boundary constraints for delegation creation.
+    ///
+    /// # Constraints
+    ///
+    /// All delegations must satisfy: `now < expires_at ≤ now + MAX_DELEGATION_DURATION`.
+    ///
+    /// ## Lower Bound (Strict >)
+    /// Rejects `expires_at <= now`, preventing:
+    /// - Already-expired delegations
+    /// - Zero-duration delegations
+    /// - Re-activation of time-traveled expirations
+    ///
+    /// Error on violation: `ContractError::ExpiryInPast` (#500).
+    ///
+    /// ### Boundary Test Cases
+    /// - `expires_at = now - 1` → REJECT (in past)
+    /// - `expires_at = now` → REJECT (exact equality)
+    /// - `expires_at = now + 1` → ACCEPT (strict >)
+    ///
+    /// ## Upper Bound (Saturating +)
+    /// Rejects `expires_at > now + MAX_DELEGATION_DURATION`, where
+    /// `MAX_DELEGATION_DURATION = 365 * 24 * 60 * 60 ≈ 31,536,000 seconds`.
+    ///
+    /// Prevents effectively indefinite delegations like `u64::MAX`.
+    ///
+    /// Error on violation: `ContractError::DelegationExpiryTooLong` (#503).
+    ///
+    /// ### Boundary Test Cases
+    /// - `expires_at = now + MAX_DELEGATION_DURATION` → ACCEPT (saturating boundary)
+    /// - `expires_at = now + MAX_DELEGATION_DURATION + 1` → REJECT (over max)
+    /// - `expires_at = u64::MAX` → REJECT (far exceeds max)
+    ///
+    /// ## Monotonic Ledger Safety
+    /// The ledger timestamp is captured once at function entry via `e.ledger().timestamp()`.
+    /// All downstream callers get the same snapshot, so:
+    /// - No code path can drift via mid-call ledger advances.
+    /// - Validation result is deterministic even if ledger advances afterward.
+    ///
+    /// This harness validates this property with sequences of advancing ledger
+    /// timestamps and verifies the rejection set remains stable.
     fn validate_delegation_expiry(e: &Env, expires_at: u64) {
         let now = e.ledger().timestamp();
+        // Lower bound check: expires_at must be STRICTLY GREATER than now (not equal)
         if expires_at <= now {
             panic_with_error!(e, ContractError::ExpiryInPast);
         }
 
+        // Upper bound check: expires_at must not exceed now + MAX_DELEGATION_DURATION
+        // Using saturating_add prevents overflow and simplifies comparison
         let max_expires_at = now.saturating_add(MAX_DELEGATION_DURATION);
         if expires_at > max_expires_at {
             panic_with_error!(e, ContractError::DelegationExpiryTooLong);
@@ -535,3 +599,6 @@ mod test_domain_separation;
 
 #[cfg(test)]
 mod test_delegation_ttl;
+
+#[cfg(test)]
+mod test_expiry_boundary;
