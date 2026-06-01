@@ -19,6 +19,10 @@ pub mod test_invariants;
 #[cfg(test)]
 mod test_invariants_usage;
 
+/// Tests for describe_config and describe_bond introspection entrypoints.
+#[cfg(test)]
+mod test_describe;
+
 use credence_errors::ContractError;
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal, String, Symbol,
@@ -78,6 +82,58 @@ fn bump_instance_ttl(e: &Env) {
         .extend_ttl(STORAGE_TTL_EXTEND_TO / 2, STORAGE_TTL_EXTEND_TO);
 }
 
+/// Read-only snapshot of all contract-level configuration.
+///
+/// Returned by [`CredenceBond::describe_config`]. Every field maps 1-to-1 to a
+/// storage key so operators can reconstruct the full config from a single call.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BondConfigView {
+    /// Contract administrator. Storage key: `DataKey::Admin`.
+    pub admin: Address,
+    /// Early-exit penalty treasury recipient. Storage key: `DataKey::EarlyExitConfig`.
+    /// `None` when early-exit config has not been set.
+    pub early_exit_treasury: Option<Address>,
+    /// Early-exit penalty rate in basis points (0–10 000). Storage key: `DataKey::EarlyExitConfig`.
+    /// `None` when early-exit config has not been set.
+    pub early_exit_penalty_bps: Option<u32>,
+    /// Weighted-attestation multiplier in basis points. Storage key: `DataKey::WeightConfig`.
+    pub weight_multiplier_bps: u32,
+    /// Maximum attestation weight cap. Storage key: `DataKey::WeightConfig`.
+    pub weight_max: u32,
+}
+
+/// Read-only snapshot of a single identity's bond state.
+///
+/// Returned by [`CredenceBond::describe_bond`]. Fields mirror `IdentityBond`
+/// plus a derived `tier` field so callers need not recompute it.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BondStateView {
+    /// Bond owner. Storage key: `DataKey::Bond`.
+    pub identity: Address,
+    /// Current bonded amount (before slashing). Storage key: `DataKey::Bond`.
+    pub bonded_amount: i128,
+    /// Cumulative slashed amount. Storage key: `DataKey::Bond`.
+    pub slashed_amount: i128,
+    /// Available (unslashed) balance: `bonded_amount - slashed_amount`.
+    pub available_amount: i128,
+    /// Ledger timestamp when the bond was created. Storage key: `DataKey::Bond`.
+    pub bond_start: u64,
+    /// Bond duration in seconds. Storage key: `DataKey::Bond`.
+    pub bond_duration: u64,
+    /// Whether the bond is currently active. Storage key: `DataKey::Bond`.
+    pub active: bool,
+    /// Whether the bond auto-renews (rolling). Storage key: `DataKey::Bond`.
+    pub is_rolling: bool,
+    /// Timestamp when withdrawal was requested (0 = not requested). Storage key: `DataKey::Bond`.
+    pub withdrawal_requested_at: u64,
+    /// Notice period duration for rolling bonds in seconds. Storage key: `DataKey::Bond`.
+    pub notice_period_duration: u64,
+    /// Derived tier based on `bonded_amount`.
+    pub tier: BondTier,
+}
+
 #[contract]
 pub struct CredenceBond;
 
@@ -107,6 +163,62 @@ impl CredenceBond {
     pub fn initialize(e: Env, admin: Address) {
         admin.require_auth();
         e.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    /// Return a structured snapshot of all contract configuration.
+    ///
+    /// Read-only; no auth required. Panics with `ContractError::NotInitialized`
+    /// when the contract has not been initialized yet.
+    ///
+    /// See also: [`docs/bond-introspection.md`](../../../docs/bond-introspection.md)
+    pub fn describe_config(e: Env) -> BondConfigView {
+        let admin: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(e, ContractError::NotInitialized));
+
+        let early_exit: Option<early_exit_penalty::EarlyExitConfig> =
+            e.storage().instance().get(&DataKey::EarlyExitConfig);
+
+        let (weight_multiplier_bps, weight_max) = weighted_attestation::get_weight_config(&e);
+
+        BondConfigView {
+            admin,
+            early_exit_treasury: early_exit.as_ref().map(|c| c.treasury.clone()),
+            early_exit_penalty_bps: early_exit.as_ref().map(|c| c.penalty_bps),
+            weight_multiplier_bps,
+            weight_max,
+        }
+    }
+
+    /// Return a snapshot of the bond state for `identity`, or `None` if no bond exists.
+    ///
+    /// Read-only; no auth required. Never panics for a missing bond — callers
+    /// should treat `None` as "bond absent".
+    ///
+    /// See also: [`docs/bond-introspection.md`](../../../docs/bond-introspection.md)
+    pub fn describe_bond(e: Env, identity: Address) -> Option<BondStateView> {
+        let bond: IdentityBond = e.storage().instance().get(&DataKey::Bond)?;
+        // The contract stores a single bond; only return it if it belongs to `identity`.
+        if bond.identity != identity {
+            return None;
+        }
+        let available_amount = bond.bonded_amount.saturating_sub(bond.slashed_amount);
+        let tier = tiered_bond::get_tier_for_amount(bond.bonded_amount);
+        Some(BondStateView {
+            identity: bond.identity,
+            bonded_amount: bond.bonded_amount,
+            slashed_amount: bond.slashed_amount,
+            available_amount,
+            bond_start: bond.bond_start,
+            bond_duration: bond.bond_duration,
+            active: bond.active,
+            is_rolling: bond.is_rolling,
+            withdrawal_requested_at: bond.withdrawal_requested_at,
+            notice_period_duration: bond.notice_period_duration,
+            tier,
+        })
     }
 
     /// Configure early exit penalty parameters.
