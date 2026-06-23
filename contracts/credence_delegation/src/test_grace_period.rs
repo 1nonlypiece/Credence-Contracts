@@ -89,7 +89,8 @@ fn in_grace_status_without_authority() {
     e.ledger().with_mut(|li| {
         li.timestamp = expires_at + grace;
     });
-    let summary_at_end = client.get_delegation_summary(&owner, &delegate, &DelegationType::Management);
+    let summary_at_end =
+        client.get_delegation_summary(&owner, &delegate, &DelegationType::Management);
     assert_eq!(summary_at_end.status, DelegationStatus::InGrace);
     assert!(!summary_at_end.is_valid);
 }
