@@ -35,6 +35,7 @@ pub enum ArbitrationError {
     InvalidOutcome = 10,
     WeightNotPositive = 11,
     NotAuthorized = 12,
+    QuorumNotMet = 13,
 }
 
 /// Assert a status transition is valid, returning ArbitrationError::InvalidTransition otherwise.
