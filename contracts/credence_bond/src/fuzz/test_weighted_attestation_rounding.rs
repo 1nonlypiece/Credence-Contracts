@@ -4,8 +4,6 @@
 //! helpers so these tests cover config storage clamping plus the arithmetic in
 //! `compute_weight`.
 
-#![cfg(test)]
-
 extern crate std;
 
 use crate::types::attestation::{DEFAULT_ATTESTATION_WEIGHT, MAX_ATTESTATION_WEIGHT};
