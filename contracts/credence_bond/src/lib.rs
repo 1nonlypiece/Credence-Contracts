@@ -48,6 +48,10 @@ mod test_liquidate;
 #[cfg(test)]
 mod test_claim_expiry_sweep;
 
+/// Authentication boundary tests — every non-view fn must require an auth'd address.
+#[cfg(test)]
+mod test_auth;
+
 use credence_errors::ContractError;
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal, String, Symbol,
@@ -1034,13 +1038,18 @@ impl CredenceBond {
     }
 
     /// Withdraw from bond after lock-up period has ended.
-    pub fn withdraw(e: Env, amount: i128) -> IdentityBond {
+    pub fn withdraw(e: Env, identity: Address, amount: i128) -> IdentityBond {
+        // auth: bond owner must authorize withdrawals.
+        identity.require_auth();
         let key = DataKey::Bond;
         let mut bond: IdentityBond = e
             .storage()
             .instance()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(e, ContractError::BondNotFound));
+        if bond.identity != identity {
+            panic_with_error!(e, ContractError::NotBondOwner);
+        }
         bump_instance_ttl(&e);
 
         let now = e.ledger().timestamp();
@@ -1090,13 +1099,18 @@ impl CredenceBond {
     }
 
     /// Withdraw before lock-up end; applies a time-decayed penalty.
-    pub fn withdraw_early(e: Env, amount: i128) -> IdentityBond {
+    pub fn withdraw_early(e: Env, identity: Address, amount: i128) -> IdentityBond {
+        // auth: bond owner must authorize early withdrawals.
+        identity.require_auth();
         let key = DataKey::Bond;
         let mut bond: IdentityBond = e
             .storage()
             .instance()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(e, ContractError::BondNotFound));
+        if bond.identity != identity {
+            panic_with_error!(e, ContractError::NotBondOwner);
+        }
         bump_instance_ttl(&e);
 
         let available = bond
@@ -1151,13 +1165,18 @@ impl CredenceBond {
     /// - `ContractError::WithdrawalAlreadyRequested` when already requested.
     ///
     /// See also: [`docs/rolling-bonds.md`](../../../docs/rolling-bonds.md)
-    pub fn request_withdrawal(e: Env) -> IdentityBond {
+    pub fn request_withdrawal(e: Env, identity: Address) -> IdentityBond {
+        // auth: bond owner must authorize the withdrawal request.
+        identity.require_auth();
         let key = DataKey::Bond;
         let mut bond: IdentityBond = e
             .storage()
             .instance()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(e, ContractError::BondNotFound));
+        if bond.identity != identity {
+            panic_with_error!(e, ContractError::NotBondOwner);
+        }
         bump_instance_ttl(&e);
         if !bond.is_rolling {
             panic_with_error!(e, ContractError::NotRollingBond);
@@ -1180,13 +1199,18 @@ impl CredenceBond {
     /// No-op for non-rolling bonds or when a withdrawal has been requested.
     ///
     /// See also: [`docs/rolling-bonds.md`](../../../docs/rolling-bonds.md)
-    pub fn renew_if_rolling(e: Env) -> IdentityBond {
+    pub fn renew_if_rolling(e: Env, identity: Address) -> IdentityBond {
+        // auth: bond owner must authorize renewal.
+        identity.require_auth();
         let key = DataKey::Bond;
         let mut bond: IdentityBond = e
             .storage()
             .instance()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(e, ContractError::BondNotFound));
+        if bond.identity != identity {
+            panic_with_error!(e, ContractError::NotBondOwner);
+        }
         if !bond.is_rolling {
             return bond;
         }
@@ -1233,13 +1257,18 @@ impl CredenceBond {
     /// - `ContractError::Overflow` when the addition would overflow `i128`.
     ///
     /// See also: [`docs/credence-bond.md`](../../../docs/credence-bond.md)
-    pub fn top_up(e: Env, amount: i128) -> IdentityBond {
+    pub fn top_up(e: Env, identity: Address, amount: i128) -> IdentityBond {
+        // auth: bond owner must authorize top-ups.
+        identity.require_auth();
         let key = DataKey::Bond;
         let mut bond: IdentityBond = e
             .storage()
             .instance()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(e, ContractError::BondNotFound));
+        if bond.identity != identity {
+            panic_with_error!(e, ContractError::NotBondOwner);
+        }
 
         let new_bonded_amount = bond
             .bonded_amount
@@ -1266,13 +1295,18 @@ impl CredenceBond {
     /// - `ContractError::Overflow` when the new duration or end timestamp would overflow `u64`.
     ///
     /// See also: [`docs/credence-bond.md`](../../../docs/credence-bond.md)
-    pub fn extend_duration(e: Env, additional_duration: u64) -> IdentityBond {
+    pub fn extend_duration(e: Env, identity: Address, additional_duration: u64) -> IdentityBond {
+        // auth: bond owner must authorize duration extensions.
+        identity.require_auth();
         let key = DataKey::Bond;
         let mut bond: IdentityBond = e
             .storage()
             .instance()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(e, ContractError::BondNotFound));
+        if bond.identity != identity {
+            panic_with_error!(e, ContractError::NotBondOwner);
+        }
         bump_instance_ttl(&e);
 
         bond.bond_duration = bond
