@@ -33,6 +33,14 @@ mod test_chaos;
 #[cfg(test)]
 mod test_describe;
 
+/// Boundary + fuzz test suite for `tiered_bond` tier-threshold transitions.
+///
+/// Addresses acceptance criteria of issue **#494**:
+/// table-driven boundary tests, deterministic fuzz over the operation
+/// sequence, and tier-change event assertions.
+#[cfg(test)]
+mod test_tier_boundary_fuzz;
+
 use credence_errors::ContractError;
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal, String, Symbol,
@@ -807,6 +815,7 @@ impl CredenceBond {
             panic_with_error!(e, ContractError::InsufficientBalance);
         }
 
+        let old_tier = tiered_bond::get_tier_for_amount(&e, bond.bonded_amount);
         bond.bonded_amount = bond
             .bonded_amount
             .checked_sub(amount)
@@ -814,6 +823,8 @@ impl CredenceBond {
         if bond.slashed_amount > bond.bonded_amount {
             panic_with_error!(e, ContractError::SlashExceedsBond);
         }
+        let new_tier = tiered_bond::get_tier_for_amount(&e, bond.bonded_amount);
+        tiered_bond::emit_tier_change_if_needed(&e, &bond.identity, old_tier, new_tier);
 
         e.storage().instance().set(&key, &bond);
         bump_instance_ttl(&e);
@@ -1060,10 +1071,13 @@ impl CredenceBond {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(e, ContractError::BondNotFound));
 
+        let old_tier = tiered_bond::get_tier_for_amount(&e, bond.bonded_amount);
         bond.bonded_amount = bond
             .bonded_amount
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(e, ContractError::Overflow));
+        let new_tier = tiered_bond::get_tier_for_amount(&e, bond.bonded_amount);
+        tiered_bond::emit_tier_change_if_needed(&e, &bond.identity, old_tier, new_tier);
 
         e.storage().instance().set(&key, &bond);
         bump_instance_ttl(&e);
